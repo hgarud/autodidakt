@@ -1,0 +1,9 @@
+# D Algorithm Engineering
+
+During the contest, AtCoder provides an official input generator, tester to evaluate program correctness, and a scoring function used for the final ranking. For training, we generate 150 test cases using seeds 0 through 149 from the input generator and run our program on each of these cases with an ALE-Bench provided  $\mathrm{C}++20$  container (yimjk/ale-bench:cpp20-202301). A program receives a non-zero reward only if it passes all correctness checks and executes within the problem time limit (2 seconds) across all 150 test cases. The per-test case score is problem-specific and matches the scoring used in the AtCoder contest. For ahc039, we use ShinkaEvolve's performance metric, which is determined by the score's relative placement among the final contest's scores, and for ahc058, we directly use the contest score.
+
+For the final evaluation, we select the top three highest-scoring programs from our local training runs and submit them to the official AtCoder submission website. For our language, we specify
+
+C++23 (GCC 15.2.0). The submission is evaluated using the same scoring and validation process as the original contest, including checks for incorrect output, time limit violations, and compilation or runtime errors on AtCoder’s hidden test cases. The resulting score is used as the final evaluation.
+
+For AHC training runs, we make a slight modification from our standard hyperparameters. For AHC039, we decrease the prompt length + thinking token limit to 22000 due to the large initial program. For AHC058, we similarly decrease the prompt length + thinking token limit to 25000 and found that a learning rate of $2\times 10^{-5}$ performed slightly better. For both AHC problems, we use a KL coefficient of $1\times 10^{-2}$. Other hyperparameters are set to our standard values.
