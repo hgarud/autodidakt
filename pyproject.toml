@@ -1,7 +1,41 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "autodiscover"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "tinker",
+  "anthropic",
+  "numpy",
+  "torch",
+  "chz",
+  "wandb",
+  "transformers",
+  "ttt-discover",
+  "fastapi",
+  "uvicorn",
+  "pydantic",
+  "scipy>=1.17.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["autodiscover*"]
+exclude = ["discover*", "scripts*", "runs*", "important_papers*", "tinker_log*", "docs*"]
+
+[tool.uv.sources]
+ttt-discover = { path = "./discover", editable = true }
+
+[project.optional-dependencies]
+discover = ["ttt-discover"]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
