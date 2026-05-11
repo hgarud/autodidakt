@@ -13,13 +13,16 @@ any details about the workflow, defer to `discover.md`.
 - **Live Claude Code session (orchestrator)**: invoked as
   `/discover <high_level_task_goal>`. Validates the trainer server, asks
   clarifying questions, gathers context from cwd + the web, posts the
-  context to `/rollout/begin`, fans out one **worktree-isolated subagent
-  per plan** in a single message, collects each subagent's results JSON,
-  posts back to `/rollout/reward`, and writes a `./results.csv` mirror.
-- **Subagents (implementers)**: `subagent_type: general-purpose`, with
-  `isolation: "worktree"`. Each receives one plan, implements it, runs the
-  problem's local evaluator inside its worktree, returns a single JSON
-  results dict, and is destroyed.
+  context to `/rollout/begin`, **APFS-clones cwd into one scratch dir per
+  plan** under `/tmp/discover/<run_id>/<plan_id>`, fans out one subagent
+  per plan in a single message, collects each subagent's results JSON,
+  posts back to `/rollout/reward`, `rm -rf`s the run's scratch tree, and
+  writes a `./results.csv` mirror.
+- **Subagents (implementers)**: `subagent_type: general-purpose`. Each
+  receives one plan plus an assigned `WORKDIR=/tmp/discover/<run>/<plan_id>`
+  (an APFS clone of cwd), `cd`s there, implements the plan, runs the
+  problem's local evaluator inside `$WORKDIR`, returns a single JSON
+  results dict, and is destroyed. Subagents do not use git worktrees.
 - **Trainer server (out-of-band)**: a problem-agnostic FastAPI process
   hosting a Tinker LoRA. Endpoints: `/status`, `/rollout/begin`,
   `/rollout/reward`, `/best`. The orchestrator talks to whatever URL is in
@@ -69,8 +72,10 @@ the full results dict for `/best`.
 
 - `./results.csv` (cwd-relative) is a thin local mirror of rewards. The
   canonical store is server-side and is what `/best` returns.
-- Subagents run in worktrees and never contact `$AUTODISCOVER_SERVER_URL`
-  directly — only the live session does.
+- Subagents run in APFS-cloned scratch dirs under `/tmp/discover/` (no git
+  worktrees) and never contact `$AUTODISCOVER_SERVER_URL` directly — only
+  the live session does. Claude Code's sandbox (`.claude/settings.json`)
+  enforces that subagent writes stay inside `/tmp/discover/`.
 - Each `/rollout/begin` returns G plans. The orchestrator emits all G
   Agent calls in a single assistant message (so they run in parallel).
 - One full run completes when `/status` returns `done: true`.

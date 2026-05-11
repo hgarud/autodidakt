@@ -43,7 +43,7 @@ memory. All helpers must be top-level (no closures or lambdas).
 
 ## Evaluating a candidate
 
-A subagent in a worktree can run:
+A subagent in its WORKDIR can run:
 
 ```
 uv run python eval.py --code-path path/to/candidate.py

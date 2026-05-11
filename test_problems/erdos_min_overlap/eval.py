@@ -1,6 +1,6 @@
 """Subagent-facing evaluator entrypoint for the Erdős test problem.
 
-Usage (inside a subagent's worktree, cwd = test_problems/erdos_min_overlap):
+Usage (inside a subagent's WORKDIR, cwd = test_problems/erdos_min_overlap):
     uv run python eval.py --code-path path/to/candidate.py
 
 Prints exactly one JSON line on stdout. Logging / Ray banners go to stderr.

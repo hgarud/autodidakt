@@ -31,7 +31,7 @@ not set; export it before running /discover."`
 - The context will be provided to an expert LLM that has no context about the code and the problem at hand.
    - Therefore, the context should only contain the necessary and sufficient information so as to not cause context bloat.
    - The expert will provide specific ideas and implementation plans for you to implement.
-   - Do not provide unncessary context to the expert such as information about subagents or worktrees or any other details that are not relevant to solving the problem at hand.
+   - Do not provide unncessary context to the expert such as information about subagents or per-plan scratch dirs or any other details that are not relevant to solving the problem at hand.
 
 ## 2.a. Seed the archive on cold start
 - If `./results.csv` already exists, skip this step — it carries the seed (and any prior runs' history).
@@ -65,14 +65,21 @@ not set; export it before running /discover."`
 - Do not save the plans to any local directory. Directly pass them out to subagents.
 
 ## 4. Implement the plans in parallel
+- Pick a `RUN_ID` for this iteration (e.g., `iter<iter_idx>-<short_random>`).
+- **Pre-clone the workspace, one scratch dir per plan.** In a single Bash call, create an APFS clone of cwd at `/tmp/discover/$RUN_ID/<plan_id>` for every plan returned by `/rollout/begin`:
+   ```
+   mkdir -p "/tmp/discover/$RUN_ID" && \
+   for plan_id in <plan_ids>; do
+     cp -cR "$PWD" "/tmp/discover/$RUN_ID/$plan_id" &
+   done; wait
+   ```
 - Fan out subagents to implement the plans in parallel.
-   - In a SINGLE message, emit one subagent tool call per plan with worktree isolation.
-   - Each subagent should run in an isolated worktree to be able to implement and execute the plan independently.
-   - Each subagent's prompt should be self-contained and contain:
+   - In a SINGLE message, emit one subagent tool call per plan. **Do not pass `isolation: "worktree"`** — filesystem isolation is now provided by the per-plan clone created above.
+   - Each subagent's prompt must be self-contained and contain:
       - The plan text.
+      - The assigned `WORKDIR=/tmp/discover/$RUN_ID/<plan_id>`. The subagent must `cd "$WORKDIR"` before any edits or commands and keep **all** edits, intermediate files, and evaluator runs inside `$WORKDIR`. It must not touch the original repo path or anything outside `$WORKDIR`.
       - Instructions to implement the plan with minimal and focused code changes.
       - Instructions to investigate and execute the code to collect and return the results to you as a JSON object.
-   - After a subagent returns, destroy their worktree.
 
 ## 5. Collect and post the results to the expert
 - Collect the results from the subagents and post them to the `$AUTODISCOVER_SERVER_URL/rollout/reward` API endpoint through an HTTP POST request.
@@ -85,3 +92,8 @@ not set; export it before running /discover."`
         -d '{"plan_id": <plan_id>, "results": <results>}' | jq .
    ```
 - Do **not** write `./results.csv` here — the canonical archive is updated server-side and pulled back into `./results.csv` at the start of the next iteration's `/rollout/begin` (step 3).
+- **Tear down the per-plan scratch dirs** for this iteration:
+   ```
+   rm -rf "/tmp/discover/$RUN_ID"
+   ```
+   One `rm` deletes all G clones.
