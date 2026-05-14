@@ -14,7 +14,6 @@ dependencies = [
   "chz",
   "wandb",
   "transformers",
-  "ttt-discover",
   "fastapi",
   "uvicorn",
   "pydantic",
@@ -24,12 +23,6 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["autodiscover*"]
 exclude = ["discover*", "scripts*", "runs*", "important_papers*", "tinker_log*", "docs*"]
-
-[tool.uv.sources]
-ttt-discover = { path = "./discover", editable = true }
-
-[project.optional-dependencies]
-discover = ["ttt-discover"]
 
 [dependency-groups]
 dev = [

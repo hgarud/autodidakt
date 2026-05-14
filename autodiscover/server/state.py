@@ -115,72 +115,91 @@ class RolloutStore:
                 plan_text=plan.plan_text,
             ))
 
-    async def submit_reward(
-        self, plan_id: str, results: dict
-    ) -> tuple[bool, bool]:
-        """Returns (group_complete, batch_complete). Raises KeyError if plan_id unknown.
+    async def submit_rewards_batch(
+        self, items: list[tuple[str, dict]],
+    ) -> tuple[list[dict], int, int]:
+        """Submit a batch of (plan_id, results) pairs atomically.
 
-        `results` is the free-form payload from the orchestrator's subagent.
-        The server reads `results["reward"]` (float; defaults to 0.0 if missing
-        or non-numeric) for the RL step. The full dict is persisted for /best.
+        Returns ``(per_item_results, groups_completed, batches_completed)``
+        where each per-item entry is shaped ``{plan_id, accepted, error}``.
+        Unknown plan_ids are surfaced as ``accepted=False`` with an error
+        string — they do not abort the batch. ``results`` is the free-form
+        payload from the orchestrator's subagent; the server reads
+        ``results["reward"]`` (float; defaults to 0.0 if missing or non-numeric)
+        for the RL step. Items are processed in submission order; archive cap
+        maintenance is order-sensitive across multiple group completions.
         """
+        per_item: list[dict] = []
+        groups_completed = 0
+        batches_completed = 0
         async with self._lock:
-            plan = self._outstanding.pop(plan_id)
-            try:
-                reward = float(results.get("reward", 0.0))
-            except (TypeError, ValueError):
-                reward = 0.0
-            self._results.append({
-                "plan_id": plan_id,
-                "iter_idx": plan.iter_idx,
-                "reward": reward,
-                "results": dict(results),
-            })
-            # Mirror reward into the PUCT archive — updates m(parent) on
-            # the parent row if any, and makes this row eligible as a
-            # PUCT parent on subsequent /rollout/begin calls.
-            self.archive.set_reward(plan_id, reward)
-            transition = Transition(
-                ob=plan.prompt_input,
-                ac=plan.action,
-                reward=reward,
-                episode_done=True,
-                metrics=results,
-            )
-            traj = Trajectory(
-                transitions=[transition],
-                final_ob=tinker.ModelInput.empty(),
-            )
-            key = (plan.iter_idx, plan.group_idx)
-            accum = self._groups[key]
-            accum.trajectories.append(traj)
-            accum.final_rewards.append(0.0)  # single-step: no group-level final reward
-            accum.metrics.append(results)
+            for plan_id, results in items:
+                try:
+                    plan = self._outstanding.pop(plan_id)
+                except KeyError:
+                    per_item.append({
+                        "plan_id": plan_id,
+                        "accepted": False,
+                        "error": f"unknown plan_id {plan_id}",
+                    })
+                    continue
+                try:
+                    try:
+                        reward = float(results.get("reward", 0.0))
+                    except (TypeError, ValueError):
+                        reward = 0.0
+                    self._results.append({
+                        "plan_id": plan_id,
+                        "iter_idx": plan.iter_idx,
+                        "reward": reward,
+                        "results": dict(results),
+                    })
+                    self.archive.set_reward(plan_id, reward)
+                    transition = Transition(
+                        ob=plan.prompt_input,
+                        ac=plan.action,
+                        reward=reward,
+                        episode_done=True,
+                        metrics=results,
+                    )
+                    traj = Trajectory(
+                        transitions=[transition],
+                        final_ob=tinker.ModelInput.empty(),
+                    )
+                    key = (plan.iter_idx, plan.group_idx)
+                    accum = self._groups[key]
+                    accum.trajectories.append(traj)
+                    accum.final_rewards.append(0.0)
+                    accum.metrics.append(results)
 
-            group_complete = len(accum.trajectories) == accum.target_G
-            batch_complete = False
-
-            if group_complete:
-                tg = TrajectoryGroup(
-                    trajectories_G=accum.trajectories,
-                    final_rewards_G=accum.final_rewards,
-                    metrics_G=accum.metrics,
-                )
-                self._pending_groups.append(tg)
-                del self._groups[key]
-                # Apply paper §A.2 archive maintenance once per completed
-                # group: cap children to top-2, then enforce the global cap.
-                if plan.parent_id:
-                    self.archive.enforce_child_cap(plan.parent_id)
-                self.archive.enforce_global_cap()
-                if len(self._pending_groups) >= self._P:
-                    batch = self._pending_groups[: self._P]
-                    self._pending_groups = self._pending_groups[self._P :]
-                    await self._batches.put(batch)
-                    batch_complete = True
-                    # Lineage block is per-batch (paper §A.2 (iv)).
-                    self.archive.clear_blocked()
-            return group_complete, batch_complete
+                    if len(accum.trajectories) == accum.target_G:
+                        tg = TrajectoryGroup(
+                            trajectories_G=accum.trajectories,
+                            final_rewards_G=accum.final_rewards,
+                            metrics_G=accum.metrics,
+                        )
+                        self._pending_groups.append(tg)
+                        del self._groups[key]
+                        # Paper §A.2 archive maintenance per completed group.
+                        if plan.parent_id:
+                            self.archive.enforce_child_cap(plan.parent_id)
+                        self.archive.enforce_global_cap()
+                        groups_completed += 1
+                        if len(self._pending_groups) >= self._P:
+                            batch = self._pending_groups[: self._P]
+                            self._pending_groups = self._pending_groups[self._P :]
+                            await self._batches.put(batch)
+                            batches_completed += 1
+                            # Lineage block is per-batch (paper §A.2 (iv)).
+                            self.archive.clear_blocked()
+                    per_item.append({
+                        "plan_id": plan_id, "accepted": True, "error": None,
+                    })
+                except Exception as e:
+                    per_item.append({
+                        "plan_id": plan_id, "accepted": False, "error": str(e),
+                    })
+        return per_item, groups_completed, batches_completed
 
     async def next_batch(self) -> list[TrajectoryGroup]:
         return await self._batches.get()

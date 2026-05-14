@@ -38,7 +38,7 @@ from autodiscover.renderers import get_renderer
 from autodiscover.config import AutoDiscoverConfig
 from autodiscover.server.api import (
     BeginRequest, BeginResponse, BestResponse, BestRow, PlanOut,
-    RewardRequest, RewardResponse, StatusResponse,
+    RewardItemResult, RewardRequest, RewardResponse, StatusResponse,
 )
 from autodiscover.server.sampling import sample_plans
 from autodiscover.server.state import OutstandingPlan, RolloutStore, make_plan_id
@@ -202,18 +202,21 @@ def build_app(
 
     @app.post("/rollout/reward", response_model=RewardResponse)
     async def reward(req: RewardRequest) -> RewardResponse:
+        items = [(r.plan_id, r.results) for r in req.rewards]
         try:
-            group_complete, batch_complete = await store.submit_reward(
-                req.plan_id, req.results,
+            per_item, groups_completed, batches_completed = (
+                await store.submit_rewards_batch(items)
             )
-        except KeyError:
-            raise HTTPException(404, f"unknown plan_id {req.plan_id}")
-        # The archive's m(parent) and child-cap state changed; re-persist.
-        _persist_archive()
+        finally:
+            # One fsync per batch — keep on-disk consistent with in-memory
+            # even if some items inside the batch errored.
+            _persist_archive()
         return RewardResponse(
-            accepted=True,
-            group_complete=group_complete,
-            batch_complete=batch_complete,
+            results=[RewardItemResult(**r) for r in per_item],
+            group_complete=groups_completed > 0,
+            batch_complete=batches_completed > 0,
+            groups_completed=groups_completed,
+            batches_completed=batches_completed,
         )
 
     @app.get("/best", response_model=BestResponse)

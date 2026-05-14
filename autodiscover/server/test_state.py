@@ -46,41 +46,22 @@ async def test_out_of_order_rewards_complete_groups_and_batch():
 
     assert store.outstanding == 4
 
-    # Reward order interleaves the two groups so neither completes first
-    # until two same-group rewards arrive.
-    rewards = {
-        plans[0].plan_id: 1.0,  # g0 t0
-        plans[2].plan_id: 3.0,  # g1 t0
-        plans[1].plan_id: 2.0,  # g0 t1 -> g0 complete, batch not yet
-        plans[3].plan_id: 4.0,  # g1 t1 -> g1 complete, batch complete
-    }
-
-    # 1st reward: neither complete
-    gc, bc = await store.submit_reward(
-        plans[0].plan_id, {"reward": rewards[plans[0].plan_id], "r": 1.0}
-    )
-    assert (gc, bc) == (False, False)
-    assert store.outstanding == 3
-
-    # 2nd reward (different group): neither complete
-    gc, bc = await store.submit_reward(
-        plans[2].plan_id, {"reward": rewards[plans[2].plan_id], "r": 3.0}
-    )
-    assert (gc, bc) == (False, False)
+    # Batch 1 interleaves the two groups so neither completes.
+    per_item, gc, bc = await store.submit_rewards_batch([
+        (plans[0].plan_id, {"reward": 1.0}),  # g0 t0
+        (plans[2].plan_id, {"reward": 3.0}),  # g1 t0
+    ])
+    assert all(r["accepted"] for r in per_item)
+    assert (gc, bc) == (0, 0)
     assert store.outstanding == 2
 
-    # 3rd reward: completes group 0, batch not yet (only 1 of 2 groups done)
-    gc, bc = await store.submit_reward(
-        plans[1].plan_id, {"reward": rewards[plans[1].plan_id], "r": 2.0}
-    )
-    assert (gc, bc) == (True, False)
-    assert store.outstanding == 1
-
-    # 4th reward: completes group 1, fills batch (P=2)
-    gc, bc = await store.submit_reward(
-        plans[3].plan_id, {"reward": rewards[plans[3].plan_id], "r": 4.0}
-    )
-    assert (gc, bc) == (True, True)
+    # Batch 2 closes both groups; with P=2 the batch is flushed.
+    per_item, gc, bc = await store.submit_rewards_batch([
+        (plans[1].plan_id, {"reward": 2.0}),  # g0 t1 -> group 0 done
+        (plans[3].plan_id, {"reward": 4.0}),  # g1 t1 -> group 1 done, batch flushes
+    ])
+    assert all(r["accepted"] for r in per_item)
+    assert (gc, bc) == (2, 1)
     assert store.outstanding == 0
 
     # next_batch should return immediately with 2 groups, each with 2 trajectories
@@ -92,7 +73,6 @@ async def test_out_of_order_rewards_complete_groups_and_batch():
             assert len(traj.transitions) == 1
         assert tg.final_rewards_G == [0.0, 0.0]
 
-    # Rewards from group 0 should appear in some trajectory of one TG, group 1 in the other.
     flat_rewards = sorted(
         traj.transitions[0].reward
         for tg in batch
@@ -108,7 +88,7 @@ async def test_top_k_round_trips_results_dict():
     await store.register_plan(plan)
 
     payload = {"reward": 0.7, "msg": "ok", "extra": [1, 2]}
-    await store.submit_reward(plan.plan_id, payload)
+    await store.submit_rewards_batch([(plan.plan_id, payload)])
 
     rows = await store.top_k(1, maximize=True)
     assert len(rows) == 1
@@ -128,8 +108,34 @@ async def test_submit_reward_defaults_missing_or_bad_reward_to_zero():
     await store.register_plan(p0)
     await store.register_plan(p1)
 
-    await store.submit_reward(p0.plan_id, {"msg": "no reward field"})
-    await store.submit_reward(p1.plan_id, {"reward": "not-a-number"})
+    per_item, _, _ = await store.submit_rewards_batch([
+        (p0.plan_id, {"msg": "no reward field"}),
+        (p1.plan_id, {"reward": "not-a-number"}),
+    ])
+    assert all(r["accepted"] for r in per_item)
 
     rows = await store.top_k(2, maximize=True)
     assert [r["reward"] for r in rows] == [0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_unknown_plan_id_in_batch_is_skipped_not_fatal():
+    store = RolloutStore(group_size=2, groups_per_batch=1)
+    p0 = _make_plan(0, 0, 0)
+    p1 = _make_plan(0, 0, 1)
+    await store.register_plan(p0)
+    await store.register_plan(p1)
+
+    per_item, gc, bc = await store.submit_rewards_batch([
+        (p0.plan_id, {"reward": 0.5}),
+        ("does_not_exist", {"reward": 9.9}),
+        (p1.plan_id, {"reward": 0.6}),
+    ])
+    # Order is preserved across accepted + rejected.
+    assert per_item[0]["accepted"] is True
+    assert per_item[1]["accepted"] is False
+    assert "unknown plan_id" in per_item[1]["error"]
+    assert per_item[2]["accepted"] is True
+    # The good two complete the only group -> 1 group, batch flush (P=1).
+    assert (gc, bc) == (1, 1)
+    assert store.outstanding == 0

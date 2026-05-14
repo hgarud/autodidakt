@@ -78,22 +78,34 @@ not set; export it before running /discover."`
    - Each subagent's prompt must be self-contained and contain:
       - The plan text.
       - The assigned `WORKDIR=/tmp/discover/$RUN_ID/<plan_id>`. The subagent must `cd "$WORKDIR"` before any edits or commands and keep **all** edits, intermediate files, and evaluator runs inside `$WORKDIR`. It must not touch the original repo path or anything outside `$WORKDIR`.
-      - Instructions to implement the plan with minimal and focused code changes.
-      - Instructions to investigate and execute the code to collect and return the results to you as a JSON object.
+      - In your sub-agent prompts, instruct the subagents to:
+         - implement the plan with minimal and focused code changes.
+         - strictly adhere to the plan and do not make any changes or try other ideas that are not specified in the plan.
+         - investigate and execute the code to collect and return the results to you as a JSON object.
+         - not make attempts to optimize the code or improve the results.
+         - to strictly adhere to a single pass read plan -> implement plan -> execute code -> return results.
+      - The subagents only job is to implement the plan and return the results to you as a JSON object.
 
 ## 5. Collect and post the results to the expert
-- Collect the results from the subagents and post them to the `$AUTODISCOVER_SERVER_URL/rollout/reward` API endpoint through an HTTP POST request.
-   - The request body should contains:
-      - `plan_id`: the plan id.
-      - `results`: the results from the subagents.
+- Collect the results from **all G subagents** and post them to `$AUTODISCOVER_SERVER_URL/rollout/reward` in a **single batched POST**. The endpoint accepts the full group at once — do not loop one curl per plan.
+   - The request body is `{ "rewards": [ { plan_id, results }, ... ] }`.
+   - Assemble the `rewards` array from every subagent's returned JSON, in any order, then post:
    ```
    curl -sfS -X POST "$AUTODISCOVER_SERVER_URL/rollout/reward" \
         -H 'content-type: application/json' \
-        -d '{"plan_id": <plan_id>, "results": <results>}' | jq .
+        -d "$(jq -n --argjson rewards "$REWARDS_JSON" '{rewards: $rewards}')" | jq .
    ```
+   where `$REWARDS_JSON` is the JSON array of `{plan_id, results}` objects for all G plans.
+   - The response shape is:
+     - `results`: list of `{plan_id, accepted, error?}` — per-item status (unknown plan_ids surface as `accepted=false` with an error; they do not abort the batch).
+     - `group_complete` / `batch_complete`: aggregate booleans (true if any group/training-batch closed in this call).
+     - `groups_completed` / `batches_completed`: integer counts (useful for logs at G=64, P=8).
+   - Duplicate plan_ids inside a single batch are a caller bug and return HTTP 422.
 - Do **not** write `./results.csv` here — the canonical archive is updated server-side and pulled back into `./results.csv` at the start of the next iteration's `/rollout/begin` (step 3).
 - **Tear down the per-plan scratch dirs** for this iteration:
    ```
    rm -rf "/tmp/discover/$RUN_ID"
    ```
    One `rm` deletes all G clones.
+
+- **Repeat the process until the problem is solved or the iteration limit is reached.**

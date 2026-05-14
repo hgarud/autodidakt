@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------- /rollout/begin ----------
@@ -46,17 +46,36 @@ class BeginResponse(BaseModel):
 
 
 # ---------- /rollout/reward ----------
-class RewardRequest(BaseModel):
+class RewardItem(BaseModel):
     plan_id: str
     # Free-form dict from the orchestrator's subagent. The server reads
     # results["reward"] (float) for the RL step and persists the rest verbatim.
     results: dict[str, Any] = Field(default_factory=dict)
 
 
-class RewardResponse(BaseModel):
+class RewardRequest(BaseModel):
+    rewards: list[RewardItem] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _no_duplicate_plan_ids(self) -> "RewardRequest":
+        ids = [r.plan_id for r in self.rewards]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate plan_id in batch")
+        return self
+
+
+class RewardItemResult(BaseModel):
+    plan_id: str
     accepted: bool
+    error: str | None = None
+
+
+class RewardResponse(BaseModel):
+    results: list[RewardItemResult]
     group_complete: bool
     batch_complete: bool
+    groups_completed: int
+    batches_completed: int
 
 
 # ---------- /status ----------

@@ -34,8 +34,10 @@ any details about the workflow, defer to `discover.md`.
 POST /rollout/begin   { iter_idx: int, context: str }
                    -> { plans: [ { plan_id, plan_text, iter_idx } ] }
 
-POST /rollout/reward  { plan_id, results: dict }
-                   -> { accepted, group_complete, batch_complete }
+POST /rollout/reward  { rewards: [ { plan_id, results: dict } ] }
+                   -> { results: [ { plan_id, accepted, error? } ],
+                        group_complete, batch_complete,
+                        groups_completed, batches_completed }
 
 GET  /status       -> { ok, iter, batches_trained, outstanding,
                         last_reward_mean, done }

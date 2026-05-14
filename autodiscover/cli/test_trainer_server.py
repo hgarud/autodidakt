@@ -114,12 +114,17 @@ def test_full_iteration_loop_updates_counters_and_picks_child(tmp_path: Path):
     csv_after_iter0 = r0.json()["archive_csv"]
     plan_ids_iter0 = [p["plan_id"] for p in r0.json()["plans"]]
 
-    rwa = client.post("/rollout/reward",
-                      json={"plan_id": plan_ids_iter0[0], "results": {"reward": 0.4}})
-    assert rwa.status_code == 200
-    rwb = client.post("/rollout/reward",
-                      json={"plan_id": plan_ids_iter0[1], "results": {"reward": 0.9}})
-    assert rwb.status_code == 200
+    rw = client.post("/rollout/reward", json={"rewards": [
+        {"plan_id": plan_ids_iter0[0], "results": {"reward": 0.4}},
+        {"plan_id": plan_ids_iter0[1], "results": {"reward": 0.9}},
+    ]})
+    assert rw.status_code == 200
+    body = rw.json()
+    assert [r["accepted"] for r in body["results"]] == [True, True]
+    assert body["groups_completed"] == 1
+    assert body["batches_completed"] == 1
+    assert body["group_complete"] is True
+    assert body["batch_complete"] is True
     # m(seed) should now reflect the best child.
     assert store.archive.m("seed") == 0.9
 
@@ -135,3 +140,42 @@ def test_full_iteration_loop_updates_counters_and_picks_child(tmp_path: Path):
     # Two expansions total now: iter 0 and iter 1.
     assert store.archive.T == 2
     assert body["parent_plan_id"] in {"seed", *plan_ids_iter0}
+
+
+def test_reward_rejects_duplicate_plan_id_in_batch(tmp_path: Path):
+    app, _, _ = _make_app(tmp_path, group_size=2, groups_per_batch=1)
+    client = TestClient(app)
+    resp = client.post("/rollout/reward", json={"rewards": [
+        {"plan_id": "0000_00_00", "results": {"reward": 0.1}},
+        {"plan_id": "0000_00_00", "results": {"reward": 0.2}},
+    ]})
+    assert resp.status_code == 422
+    assert "duplicate plan_id" in resp.text
+
+
+def test_reward_unknown_plan_id_is_per_item_not_404(tmp_path: Path):
+    app, store, _ = _make_app(tmp_path, group_size=2, groups_per_batch=1)
+    seed_csv = (
+        "plan_id,iter_idx,parent_id,reward,plan_text\n"
+        "seed,-1,,0.0,baseline\n"
+    )
+    client = TestClient(app)
+    with patch("autodiscover.cli.trainer_server.sample_plans",
+               new=_stub_sample_plans(["A", "B"])):
+        r0 = client.post("/rollout/begin",
+                         json={"iter_idx": 0, "context": "ctx", "archive_csv": seed_csv})
+    assert r0.status_code == 200
+    plan_ids = [p["plan_id"] for p in r0.json()["plans"]]
+
+    rw = client.post("/rollout/reward", json={"rewards": [
+        {"plan_id": plan_ids[0], "results": {"reward": 0.3}},
+        {"plan_id": "not_a_real_id", "results": {"reward": 0.4}},
+        {"plan_id": plan_ids[1], "results": {"reward": 0.5}},
+    ]})
+    assert rw.status_code == 200
+    body = rw.json()
+    accepted = [r["accepted"] for r in body["results"]]
+    assert accepted == [True, False, True]
+    assert "unknown plan_id" in body["results"][1]["error"]
+    # Group still closed by the two valid items.
+    assert body["groups_completed"] == 1

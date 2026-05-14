@@ -20,7 +20,7 @@ class AutoDiscoverConfig:
     groups_per_batch: int = 8      # P — groups per training batch
     num_epochs: int = 50           # batches before the loop self-terminates
     learning_rate: float = 4e-5
-    save_every: int = 2
+    save_every: int = 1
     temperature: float = 1.0
     kl_penalty_coef: float = 0.1
     phase1_max_tokens: int = 26000
