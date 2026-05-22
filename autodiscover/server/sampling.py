@@ -1,7 +1,7 @@
-"""Sample G plans in parallel from a Tinker SamplingClient.
+"""Sample G plans in parallel via a SamplingClient.
 
 The trainer server calls ``sample_plans(...)`` per ``/rollout/begin``. The
-orchestrator never touches Tinker directly.
+orchestrator never touches the backend directly.
 """
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ import asyncio
 from dataclasses import dataclass
 
 from textwrap import dedent
-import tinker
 
-from autodiscover.sampling.completers import StopCondition, TokensWithLogprobs, TwoPhaseTokenCompleter
+from autodiscover.backends.protocol import SamplingClient
+from autodiscover.backends.types import TokenSequence
+from autodiscover.completers import StopCondition, TokensWithLogprobs, TwoPhaseTokenCompleter
 
 
 SYSTEM_PROMPT = dedent(
@@ -19,7 +20,10 @@ SYSTEM_PROMPT = dedent(
     A junior researcher on your team is working on a problem and needs your instructions on how to proceed.
     They will provide all the context needed to make progress on a hard scientific problem.
     You task is to analyze their query, think hard about the problem, and respond only with precise and concise instructions for them, in markdown, terminated with </plan>.
-    Do not summarize the problem, your response should be direct and to the point. Do not include any other text, commentary, explanation or summary.
+    Do not summarize the problem, your response should be direct and to the point.
+    Do not include any other text, commentary, explanation or summary.
+    They already know how to execute and evaluate the code, so you don't need to tell them how to do that.
+    They are going to strictly adhere to a single pass read plan -> implement plan -> execute code -> return results so structure your plan accordingly.
     """
 )
 
@@ -87,7 +91,7 @@ def _build_user_message(
 
 async def sample_plans(
     *,
-    sampling_client: tinker.SamplingClient,
+    sampling_client: SamplingClient,
     tokenizer,                 # from get_tokenizer
     renderer,                  # from get_renderer
     context: str,
@@ -97,7 +101,7 @@ async def sample_plans(
     stop_condition: StopCondition,
     parent_plan_text: str | None = None,
     parent_reward: float | None = None,
-) -> tuple[tinker.ModelInput, list[SampledPlan]]:
+) -> tuple[TokenSequence, list[SampledPlan]]:
     """Build the prompt from ``context`` once, then sample G plans concurrently.
 
     Returns ``(shared_prompt_input, plans)``. The same ``prompt_input`` is

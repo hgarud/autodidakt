@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
-import tinker
+from autodiscover.backends.types import TokenSequence
 from autodiscover.types import Trajectory, TrajectoryGroup, Transition, TokensWithLogprobs
 
 from autodiscover.server.archive import Archive, ArchiveEntry
@@ -22,7 +22,7 @@ class OutstandingPlan:
     iter_idx: int
     group_idx: int
     traj_idx: int
-    prompt_input: tinker.ModelInput
+    prompt_input: TokenSequence
     action: TokensWithLogprobs
     plan_text: str
     # Parent plan_id chosen by PUCT for the group this plan belongs to.
@@ -164,7 +164,7 @@ class RolloutStore:
                     )
                     traj = Trajectory(
                         transitions=[transition],
-                        final_ob=tinker.ModelInput.empty(),
+                        final_ob=TokenSequence(tokens=[]),
                     )
                     key = (plan.iter_idx, plan.group_idx)
                     accum = self._groups[key]

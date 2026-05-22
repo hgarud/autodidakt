@@ -5,9 +5,8 @@ Basic interfaces and types for reinforcement learning.
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
-import tinker
-
-from autodiscover.sampling.completers import StopCondition, TokensWithLogprobs
+from autodiscover.backends.types import TokenSequence
+from autodiscover.completers import StopCondition, TokensWithLogprobs
 from autodiscover.utils import safezip
 
 __all__ = [
@@ -17,7 +16,7 @@ __all__ = [
 ]
 
 Action: TypeAlias = list[int]
-Observation: TypeAlias = tinker.ModelInput
+Observation: TypeAlias = TokenSequence
 Logprobs: TypeAlias = list[float]
 Metrics: TypeAlias = dict[str, float | int]
 

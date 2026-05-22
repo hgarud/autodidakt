@@ -1,68 +1,65 @@
-"""
-RL training step primitives.
+"""RL training step primitives (backend-agnostic).
 
-Extracted from the original discover RL training script; only the four
-public entrypoints (`compute_advantages`, `incorporate_kl_penalty`,
-`train_step`, `save_checkpoint_and_get_sampling_client`) plus their
-private helpers are kept here.
+Public entrypoints:
+- compute_advantages
+- incorporate_kl_penalty
+- train_step
 """
+from __future__ import annotations
 
-import asyncio
 import logging
 import math
-from typing import Any, Dict, List, cast
+from typing import Dict, List
 
 import numpy as np
-import tinker
 import torch
-from tinker.types import LossFnType
 
-from autodiscover.checkpointing import save_checkpoint_async
+from autodiscover.backends.protocol import SamplingClient, TrainingClient
+from autodiscover.backends.types import TokenSequence, TrainingDatum
 from autodiscover.trace import scope
 from autodiscover.types import TrajectoryGroup
-from autodiscover.utils import safezip, split_list, timed
+from autodiscover.utils import safezip, split_list
 
 logger = logging.getLogger(__name__)
 
 
 @scope
 async def incorporate_kl_penalty(
-    data_D: List[tinker.Datum],
-    base_sampling_client: tinker.SamplingClient,
+    data_D: List[TrainingDatum],
+    base_sampling_client: SamplingClient,
     kl_penalty_coef: float,
 ) -> Dict[str, float]:
+    """KL against base. Adjusts ``datum.advantages`` in place by
+    ``kl_coef * mask * (avg_logp_diff - logprob_diffs[i])``.
     """
-    Compute KL against base model. Adjust advantages in-place by logp_base - logp_current - avg_kl,
-    where avg_kl is the average of logp_base - logp_current (which is -KL[current, base])
-    """
-    # Compute logprobs at all data items
-    full_sequence_inputs_D = [
-        datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
-        for datum in data_D
+    # Full sequence = input_tokens + [last target token].
+    full_sequences = [
+        TokenSequence(tokens=d.input_tokens + [d.target_tokens[-1]])
+        for d in data_D
     ]
-    base_logprobs_D = await asyncio.gather(
-        *[
-            base_sampling_client.compute_logprobs_async(sequence_input)
-            for sequence_input in full_sequence_inputs_D
-        ]
-    )
-    # compute the logprob differences, zeroed out when the mask == 0
-    sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
-    float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
+    base_logprobs_D = await base_sampling_client.compute_logprobs(full_sequences)
+
+    sampled_logprobs_D = [torch.tensor(d.old_logprobs) for d in data_D]
+    float_masks = [torch.tensor(d.mask, dtype=torch.float32) for d in data_D]
+
     logprob_diffs = [
-        (sampled_logprobs - torch.tensor(base_logprobs[1:])) * mask
-        for base_logprobs, sampled_logprobs, mask in safezip(
-            base_logprobs_D, sampled_logprobs_D, float_masks
+        (sampled_lp - torch.tensor(base_lp[1:])) * mask
+        for base_lp, sampled_lp, mask in safezip(
+            base_logprobs_D, sampled_logprobs_D, float_masks,
         )
     ]
-    avg_logp_diff = sum([diff.sum() for diff in logprob_diffs]) / sum(
-        [mask.sum() for mask in float_masks]
-    )
-    for i, datum in enumerate(data_D):
-        kl_advantages = kl_penalty_coef * float_masks[i] * (avg_logp_diff - logprob_diffs[i])
-        datum.loss_fn_inputs["advantages"] = tinker.TensorData.from_torch(
-            datum.loss_fn_inputs["advantages"].to_torch() + kl_advantages
+    total_mass = sum(m.sum() for m in float_masks)
+    avg_logp_diff = sum(diff.sum() for diff in logprob_diffs) / total_mass
+
+    for i, d in enumerate(data_D):
+        kl_adv = (
+            kl_penalty_coef
+            * float_masks[i]
+            * (avg_logp_diff - logprob_diffs[i])
         )
+        new_adv = torch.tensor(d.advantages) + kl_adv
+        d.advantages = new_adv.tolist()
+
     return {"kl_policy_base": float(avg_logp_diff)}
 
 
@@ -147,130 +144,19 @@ def compute_advantages(trajectory_groups_P: List[TrajectoryGroup], adv_estimator
 
 
 @scope
-async def enqueue_optim_step(
-    training_client: tinker.TrainingClient,
-    learning_rate: float,
-) -> tinker.APIFuture[tinker.OptimStepResponse]:
-    """Enqueue an optimizer step and return the future"""
-    adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-8)
-    optim_step_future = await training_client.optim_step_async(adam_params)
-    return optim_step_future
-
-
-@scope
-async def consume_optim_step(
-    optim_step_future: tinker.APIFuture[tinker.OptimStepResponse],
-) -> tinker.OptimStepResponse:
-    """Apply the accumulated gradients to update the model weights and return the result"""
-    return await optim_step_future.result_async()
-
-
-@scope
-def remove_mask(datum: tinker.Datum) -> tinker.Datum:
-    return tinker.Datum(
-        model_input=datum.model_input,
-        loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
-    )
-
-
-@scope
-async def enqueue_forward_backward(
-    training_client: tinker.TrainingClient,
-    batch_d: List[tinker.Datum],
-    loss_fn: LossFnType,
-) -> tinker.APIFuture[tinker.ForwardBackwardOutput]:
-    """Enqueue a forward-backward pass for a minibatch of data and return the future"""
-    fwd_bwd_future = await training_client.forward_backward_async(
-        list(map(remove_mask, batch_d)), loss_fn=loss_fn
-    )
-    return fwd_bwd_future
-
-
-@scope
-async def consume_forward_backward(
-    fwd_bwd_future: tinker.APIFuture[tinker.ForwardBackwardOutput],
-) -> List[torch.Tensor]:
-    """Consume the result of a forward-backward pass and return the training logprobs"""
-    fwd_bwd_result = await fwd_bwd_future.result_async()
-
-    # Extract training logprobs from loss_fn_outputs
-    training_logprobs_D: list[torch.Tensor] = []
-    for output in fwd_bwd_result.loss_fn_outputs:
-        training_logprobs = output["logprobs"].to_torch()
-        training_logprobs_D.append(training_logprobs)
-
-    # We dont display fwd_bwd_result.metrics to avoid spam
-    return training_logprobs_D
-
-
-@scope
 async def train_step(
-    data_D: List[tinker.Datum],
-    training_client: tinker.TrainingClient,
+    data_D: List[TrainingDatum],
+    training_client: TrainingClient,
     learning_rate: float,
     num_substeps: int,
-    loss_fn: LossFnType,
-) -> List[torch.Tensor]:
-    """Train the model on collected trajectories."""
+    loss_fn: str,
+) -> None:
+    """Run ``num_substeps`` forward_backward + optim_step pairs over the
+    batch. Backend may pipeline internally.
+    """
+    if not data_D:
+        return
     batches_md = split_list(data_D, min(num_substeps, len(data_D)))
-    training_logprobs_D: list[torch.Tensor] = []
-
-    if len(batches_md) == 0:
-        return training_logprobs_D
-
-    enqueued_futures: (
-        tuple[
-            tinker.APIFuture[tinker.ForwardBackwardOutput],
-            tinker.APIFuture[tinker.OptimStepResponse],
-        ]
-        | None
-    ) = (
-        await enqueue_forward_backward(training_client, batches_md[0], loss_fn),
-        await enqueue_optim_step(training_client, learning_rate),
-    )
-
-    for i in range(len(batches_md)):
-        assert enqueued_futures is not None
-
-        fwd_bwd_future, optim_step_future = enqueued_futures
-        enqueued_futures = None
-
-        # Enqueue the next forward-backward pass and optimizer step before consuming the current result
-        if i != len(batches_md) - 1:
-            assert enqueued_futures is None
-            enqueued_futures = (
-                await enqueue_forward_backward(training_client, batches_md[i + 1], loss_fn),
-                await enqueue_optim_step(training_client, learning_rate),
-            )
-
-        training_logprobs = await consume_forward_backward(fwd_bwd_future)
-        training_logprobs_D.extend(training_logprobs)
-
-        await consume_optim_step(optim_step_future)
-
-    assert enqueued_futures is None
-
-    return training_logprobs_D
-
-
-@scope
-async def save_checkpoint_and_get_sampling_client(
-    training_client: tinker.TrainingClient,
-    i_batch: int,
-    log_path: str,
-    save_every: int,
-    start_batch: int = 0,
-) -> tuple[tinker.SamplingClient, dict[str, Any]]:
-    metrics = {}
-    with timed("save_checkpoint", metrics):
-        if save_every > 0 and i_batch > start_batch and i_batch % save_every == 0:
-            path_dict = await save_checkpoint_async(
-                training_client=training_client,
-                name=f"{i_batch:06d}",
-                log_path=log_path,
-                loop_state={"batch": i_batch},
-                kind="both",
-            )
-            return training_client.create_sampling_client(path_dict["sampler_path"]), metrics
-        else:
-            return await training_client.save_weights_and_get_sampling_client_async(), metrics
+    for batch in batches_md:
+        await training_client.forward_backward(batch, loss_fn)
+        await training_client.optim_step(learning_rate=learning_rate)

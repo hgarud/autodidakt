@@ -13,13 +13,11 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-import tinker
-
+from autodiscover.backends.protocol import SamplingClient, TrainingClient
 from autodiscover.training.data import assemble_training_data
 from autodiscover.training.step import (
     compute_advantages,
     incorporate_kl_penalty,
-    save_checkpoint_and_get_sampling_client,
     train_step,
 )
 
@@ -39,9 +37,9 @@ class TrainingLoop:
         self,
         *,
         store: RolloutStore,
-        training_client: tinker.TrainingClient,
-        base_sampling_client: tinker.SamplingClient,
-        sampling_client: tinker.SamplingClient,
+        training_client: TrainingClient,
+        base_sampling_client: SamplingClient,
+        sampling_client: SamplingClient,
         log_dir: Path,
         learning_rate: float,
         kl_penalty_coef: float,
@@ -49,10 +47,9 @@ class TrainingLoop:
         adv_estimator_beta: float,
         loss_fn: str,
         num_substeps: int,
-        save_every: int,
         num_epochs: int,
         on_metrics: Callable[[dict[str, Any]], None] | None = None,
-    ):
+    ) -> None:
         self._store = store
         self._training_client = training_client
         self._base_sampling_client = base_sampling_client
@@ -64,7 +61,6 @@ class TrainingLoop:
         self._adv_estimator_beta = adv_estimator_beta
         self._loss_fn = loss_fn
         self._num_substeps = num_substeps
-        self._save_every = save_every
         self._num_epochs = num_epochs
         self._on_metrics = on_metrics or (lambda _: None)
 
@@ -72,7 +68,7 @@ class TrainingLoop:
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()  # guards _sampling_client read/swap
 
-    async def current_sampling_client(self) -> tinker.SamplingClient:
+    async def current_sampling_client(self) -> SamplingClient:
         async with self._lock:
             return self._sampling_client
 
@@ -110,20 +106,16 @@ class TrainingLoop:
                     data, self._base_sampling_client, self._kl_coef,
                 )
 
-            train_step_out = await train_step(
+            await train_step(
                 data,
                 self._training_client,
                 self._lr,
                 self._num_substeps,
                 self._loss_fn,
             )
-            self._maybe_dump_trace(i, advantages, data, kl_metrics, train_step_out)
-            new_client, ckpt_metrics = await save_checkpoint_and_get_sampling_client(
-                self._training_client,
-                i_batch=i,
-                log_path=str(self._log_dir),
-                save_every=self._save_every,
-            )
+            self._maybe_dump_trace(i, advantages, data, kl_metrics)
+
+            new_client = await self._training_client.get_post_training_sampling_client()
             async with self._lock:
                 self._sampling_client = new_client
 
@@ -140,7 +132,6 @@ class TrainingLoop:
                 "batch": i,
                 "reward_mean": reward_mean,
                 **kl_metrics,
-                **(ckpt_metrics or {}),
             })
         except Exception:
             logger.exception("training step %d failed", i)
@@ -154,30 +145,18 @@ class TrainingLoop:
         advantages: Any,
         data: Any,
         kl_metrics: dict[str, Any],
-        train_step_out: Any,
     ) -> None:
-        """Layer-F regression hook: when AUTODISCOVER_DEBUG_TRACE=1, dump
-        (advantages, data_input_tokens, kl_metrics, train_step_returned_logprobs)
-        for byte-for-byte comparison against the reference RL path.
+        """When AUTODISCOVER_DEBUG_TRACE=1, dump (advantages,
+        data_input_tokens, kl_metrics).
         """
         if os.environ.get("AUTODISCOVER_DEBUG_TRACE") != "1":
             return
         try:
-            adv_payload = [
-                [list(map(float, group_adv)) for group_adv in advantages]
-            ] if advantages else []
-            tokens_payload = []
-            for d in data:
-                toks = getattr(getattr(d, "model_input", None), "tokens", None)
-                if toks is None:
-                    toks = getattr(d, "input_tokens", None)
-                if toks is not None:
-                    tokens_payload.append(list(map(int, toks)))
-            logprobs_payload = None
-            if train_step_out is not None:
-                lp = getattr(train_step_out, "logprobs", None)
-                if lp is not None:
-                    logprobs_payload = [list(map(float, row)) for row in lp]
+            adv_payload = (
+                [[list(map(float, group_adv)) for group_adv in advantages]]
+                if advantages else []
+            )
+            tokens_payload = [list(map(int, d.input_tokens)) for d in data]
             trace_path = self._log_dir / "_trace.json"
             existing = []
             if trace_path.exists():
@@ -189,9 +168,10 @@ class TrainingLoop:
                 "i_batch": i_batch,
                 "advantages": adv_payload,
                 "data_input_tokens": tokens_payload,
-                "kl_metrics": {k: float(v) for k, v in (kl_metrics or {}).items()
-                                if isinstance(v, (int, float))},
-                "train_step_returned_logprobs": logprobs_payload,
+                "kl_metrics": {
+                    k: float(v) for k, v in (kl_metrics or {}).items()
+                    if isinstance(v, (int, float))
+                },
             })
             trace_path.write_text(json.dumps(existing))
         except Exception:

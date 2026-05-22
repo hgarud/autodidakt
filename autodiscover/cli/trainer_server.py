@@ -27,16 +27,16 @@ import socket
 import sys
 from pathlib import Path
 
-import tinker
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 
-from autodiscover.sampling.completers import TokensWithLogprobs
+from autodiscover.completers import TokensWithLogprobs
 from autodiscover.tokenizer import get_tokenizer
 from autodiscover.renderers import get_renderer
 
+from autodiscover.backends.protocol import SamplingClient, TrainingClient
 from autodiscover.config import AutoDiscoverConfig
-from autodiscover.server.api import (
+from autodiscover.server.schemas import (
     BeginRequest, BeginResponse, BestResponse, BestRow, PlanOut,
     RewardItemResult, RewardRequest, RewardResponse, StatusResponse,
 )
@@ -66,6 +66,40 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--model-name", type=str)
     p.add_argument("--renderer-name", type=str)
     p.add_argument("--wandb-project", type=str, default=None)
+    p.add_argument(
+        "--backend",
+        choices=["tinker", "mlx_local"],
+        default="tinker",
+        help="Sampling/training backend. 'tinker' (default) uses the hosted "
+             "service; 'mlx_local' uses a local mlx_lm.server + in-process MLX.",
+    )
+    # MLX-only flags. Ignored when --backend != mlx_local.
+    p.add_argument(
+        "--mlx-sampler-url",
+        default="http://127.0.0.1:8081",
+        help="URL of the locally-running mlx_lm.server (mlx_local backend).",
+    )
+    p.add_argument(
+        "--mlx-adapter-dir",
+        default=None,
+        help="Directory where LoRA adapters are written and reloaded "
+             "(mlx_local backend). Defaults to <log_dir>/adapters.",
+    )
+    p.add_argument(
+        "--mlx-model",
+        default=None,
+        help="MLX model identifier (e.g. 'mlx-community/gpt-oss-120b-MXFP4'). "
+             "Defaults to cfg.model_name. Only used by mlx_local backend.",
+    )
+    p.add_argument(
+        "--mlx-sampler-max-concurrency",
+        type=int,
+        default=1,
+        help="Max in-flight HTTP requests to mlx_lm.server. The MLX model "
+             "runs forward passes serially, so the default (1) avoids "
+             "client-side read timeouts when the server queues requests. "
+             "Raise only if your sampler has meaningful continuous batching.",
+    )
     return p.parse_args(argv)
 
 
@@ -84,14 +118,36 @@ def build_cfg(args: argparse.Namespace) -> AutoDiscoverConfig:
     return cfg
 
 
-async def _make_tinker_clients(cfg: AutoDiscoverConfig):
-    service_client = tinker.ServiceClient(base_url=None)
-    base_sampling_client = service_client.create_sampling_client(base_model=cfg.model_name)
-    training_client = await service_client.create_lora_training_client_async(
-        cfg.model_name, rank=cfg.lora_rank,
-    )
-    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-    return service_client, training_client, base_sampling_client, sampling_client
+async def build_backend(
+    cfg: AutoDiscoverConfig,
+    args: argparse.Namespace,
+    log_dir: Path,
+) -> tuple[SamplingClient, SamplingClient, TrainingClient]:
+    """Returns (base_sampling, sampling, training) protocol clients."""
+    if args.backend == "tinker":
+        from autodiscover.backends.tinker import make_tinker_backend
+        return await make_tinker_backend(
+            model_name=cfg.model_name,
+            lora_rank=cfg.lora_rank,
+            log_dir=str(log_dir),
+            save_every=cfg.save_every,
+        )
+    elif args.backend == "mlx_local":
+        from autodiscover.backends.mlx import make_mlx_backend
+        adapter_dir = Path(args.mlx_adapter_dir or (log_dir / "adapters"))
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        return await make_mlx_backend(
+            sampler_url=args.mlx_sampler_url,
+            adapter_dir=adapter_dir,
+            model_name=args.mlx_model or cfg.model_name,
+            lora_rank=cfg.lora_rank,
+            save_every=cfg.save_every,
+            log_dir=str(log_dir),
+            learning_rate=cfg.learning_rate,
+            sampler_max_concurrency=args.mlx_sampler_max_concurrency,
+        )
+    else:
+        raise ValueError(f"unknown backend: {args.backend}")
 
 
 def build_app(
@@ -243,7 +299,7 @@ async def amain(args: argparse.Namespace) -> int:
     # ever opens. "</plan>" is enforced post-hoc in _strip_harmony_markup.
     stop_condition = renderer.get_stop_sequences()
 
-    _, training_client, base_sampling, sampling = await _make_tinker_clients(cfg)
+    base_sampling, sampling, training_client = await build_backend(cfg, args, log_dir)
 
     store = RolloutStore(group_size=cfg.group_size, groups_per_batch=cfg.groups_per_batch)
     # Persistent archive lives under log_dir so it survives restarts and
@@ -267,7 +323,6 @@ async def amain(args: argparse.Namespace) -> int:
         adv_estimator_beta=cfg.adv_estimator_beta,
         loss_fn=cfg.loss_fn,
         num_substeps=cfg.num_substeps,
-        save_every=cfg.save_every,
         num_epochs=cfg.num_epochs,
     )
 

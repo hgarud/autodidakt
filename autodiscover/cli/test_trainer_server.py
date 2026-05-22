@@ -9,9 +9,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import tinker
 from fastapi.testclient import TestClient
 
+from autodiscover.backends.types import TokenSequence
 from autodiscover.cli import trainer_server
 from autodiscover.config import AutoDiscoverConfig
 from autodiscover.server.sampling import SampledPlan
@@ -56,7 +56,7 @@ def _stub_sample_plans(plan_texts: list[str]):
             )
             for t in plan_texts
         ]
-        return tinker.ModelInput.empty(), plans
+        return TokenSequence(tokens=[]), plans
     return _fake
 
 
@@ -151,6 +151,21 @@ def test_reward_rejects_duplicate_plan_id_in_batch(tmp_path: Path):
     ]})
     assert resp.status_code == 422
     assert "duplicate plan_id" in resp.text
+
+
+def test_backend_flag_default_is_tinker():
+    args = trainer_server.parse_args([])
+    assert args.backend == "tinker"
+
+
+def test_backend_flag_parses_mlx_local():
+    args = trainer_server.parse_args(["--backend", "mlx_local"])
+    assert args.backend == "mlx_local"
+
+
+def test_backend_flag_rejects_unknown_backend():
+    with pytest.raises(SystemExit):
+        trainer_server.parse_args(["--backend", "made_up_backend"])
 
 
 def test_reward_unknown_plan_id_is_per_item_not_404(tmp_path: Path):

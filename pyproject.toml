@@ -7,17 +7,28 @@ name = "autodiscover"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-  "tinker",
   "anthropic",
-  "numpy",
-  "torch",
   "chz",
-  "wandb",
-  "transformers",
   "fastapi",
-  "uvicorn",
+  "httpx",
+  "numpy",
   "pydantic",
   "scipy>=1.17.1",
+  "torch",
+  "transformers",
+  "uvicorn",
+  "wandb",
+]
+
+[project.optional-dependencies]
+tinker = ["tinker"]
+mlx = [
+  "mlx",
+  "mlx-lm>=0.31.3",
+]
+# Combine if both backends are wanted in one venv (e.g. CI).
+all = [
+  "autodiscover[tinker,mlx]",
 ]
 
 [tool.setuptools.packages.find]

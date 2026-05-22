@@ -5,6 +5,21 @@
       "allowWrite": [
         "/tmp/discover",
         "/private/tmp/discover"
+      ],
+      "denyRead": [
+        "~/.aws",
+        "~/.ssh",
+        "~/.config/gcloud",
+        "~/.kube",
+        "~/.netrc",
+        "~/.docker/config.json"
+      ]
+    },
+    "network": {
+      "allowedHosts": [
+        "127.0.0.1",
+        "localhost",
+        "::1"
       ]
     }
   }

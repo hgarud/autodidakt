@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-import tinker
 
+from autodiscover.backends.types import TokenSequence
 from autodiscover.server.state import (
     OutstandingPlan,
     RolloutStore,
@@ -20,7 +20,7 @@ def _make_plan(iter_idx: int, group_idx: int, traj_idx: int) -> OutstandingPlan:
         iter_idx=iter_idx,
         group_idx=group_idx,
         traj_idx=traj_idx,
-        prompt_input=tinker.ModelInput.empty(),
+        prompt_input=TokenSequence(tokens=[]),
         action=TokensWithLogprobs(
             tokens=[traj_idx + 1, group_idx + 10],
             maybe_logprobs=[-0.1, -0.2],
